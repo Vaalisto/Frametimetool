@@ -14,6 +14,7 @@ const (
 	axisHeadroom     = 1.05
 	yAxisHeadroom    = 1.15
 	smoothingSigmaMS = 0.05
+	maxAxisTicks     = 40
 )
 
 // distribution holds everything needed to draw the chart. Percentages are per series.
@@ -189,16 +190,36 @@ func niceCeiling(value float64) float64 {
 	return ceiling
 }
 
+// niceAxisRange returns an axis maximum and tick step. Ranges of 1 ms and more
+// use 1 ms steps, coarsening to 2, 5, 10 ms... only when that would exceed
+// maxAxisTicks. Sub-millisecond ranges use about eight ticks.
 func niceAxisRange(dataMax float64) (maxValue, step float64) {
 	if dataMax <= 0 || math.IsNaN(dataMax) || math.IsInf(dataMax, 0) {
 		dataMax = 1
 	}
-	step = niceCeiling(dataMax / 8)
+	if dataMax >= 1 {
+		step = millisecondStep(dataMax)
+	} else {
+		step = niceCeiling(dataMax / 8)
+	}
 	maxValue = math.Ceil(dataMax/step) * step
 	if math.IsInf(maxValue, 0) || maxValue < dataMax {
 		return dataMax, dataMax / 8
 	}
 	return maxValue, step
+}
+
+// millisecondStep returns the smallest 1, 2, 5 × 10^n step that keeps the axis
+// within maxAxisTicks, so 1 ms is used whenever it fits.
+func millisecondStep(dataMax float64) float64 {
+	for decade := 1.0; ; decade *= 10 {
+		for _, multiplier := range []float64{1, 2, 5} {
+			step := multiplier * decade
+			if math.Ceil(dataMax/step) <= maxAxisTicks {
+				return step
+			}
+		}
+	}
 }
 
 func formatAxisValue(value float64) string {

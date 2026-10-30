@@ -223,6 +223,22 @@ func TestFormatAxisValueHidesFloatRoundingArtifacts(t *testing.T) {
 	}
 }
 
+func TestNiceAxisRangeUsesOneMillisecondSteps(t *testing.T) {
+	tests := []struct {
+		dataMax, wantMax, wantStep float64
+	}{
+		{dataMax: 20.3, wantMax: 21, wantStep: 1},
+		{dataMax: 1.5, wantMax: 2, wantStep: 1},
+		{dataMax: 120, wantMax: 120, wantStep: 5},
+	}
+	for _, test := range tests {
+		maxValue, step := niceAxisRange(test.dataMax)
+		if math.Abs(maxValue-test.wantMax) > 1e-12 || math.Abs(step-test.wantStep) > 1e-12 {
+			t.Errorf("niceAxisRange(%v) = (%v, %v), want (%v, %v)", test.dataMax, maxValue, step, test.wantMax, test.wantStep)
+		}
+	}
+}
+
 func TestNiceAxisRangeAdaptsToSmallValues(t *testing.T) {
 	maxValue, step := niceAxisRange(0.63)
 	if math.Abs(maxValue-0.7) > 1e-12 || math.Abs(step-0.1) > 1e-12 {
