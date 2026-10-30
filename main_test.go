@@ -12,7 +12,7 @@ import (
 
 func TestReadFrameTimesConvertsMicrosecondsToMilliseconds(t *testing.T) {
 	input := "Time,Render CPU (µs),Render GPU (µs)\n0,1250,2500\n1,0,750\n"
-	times, err := readFrameTimes(strings.NewReader(input))
+	times, err := readFrameTimes(strings.NewReader(input), cpuColumn, gpuColumn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestReadFrameTimesConvertsMicrosecondsToMilliseconds(t *testing.T) {
 }
 
 func TestReadFrameTimesRequiresColumns(t *testing.T) {
-	_, err := readFrameTimes(strings.NewReader("CPU,GPU\n1,2\n"))
+	_, err := readFrameTimes(strings.NewReader("CPU,GPU\n1,2\n"), cpuColumn, gpuColumn)
 	if err == nil || !strings.Contains(err.Error(), cpuColumn) || !strings.Contains(err.Error(), gpuColumn) {
 		t.Fatalf("expected required-column error, got %v", err)
 	}
@@ -33,9 +33,31 @@ func TestReadFrameTimesRequiresColumns(t *testing.T) {
 
 func TestReadFrameTimesRejectsInvalidValues(t *testing.T) {
 	input := "Render CPU (µs),Render GPU (µs)\nnot-a-number,2\n"
-	_, err := readFrameTimes(strings.NewReader(input))
+	_, err := readFrameTimes(strings.NewReader(input), cpuColumn, gpuColumn)
 	if err == nil || !strings.Contains(err.Error(), "row 2") {
 		t.Fatalf("expected row-specific parse error, got %v", err)
+	}
+}
+
+func TestReadFrameTimesUsesCustomColumns(t *testing.T) {
+	input := "CPU render,GPU render\n4250,7825\n"
+	times, err := readFrameTimes(strings.NewReader(input), "CPU render", "GPU render")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if times.cpuMS[0] != 4.25 || times.gpuMS[0] != 7.825 {
+		t.Fatalf("unexpected timings for custom columns: %#v", times)
+	}
+}
+
+func TestValidateColumnNames(t *testing.T) {
+	if err := validateColumnNames("CPU", "GPU"); err != nil {
+		t.Fatalf("valid column names rejected: %v", err)
+	}
+	for _, names := range [][2]string{{"", "GPU"}, {"CPU", "CPU"}, {"CPU\n", "GPU"}} {
+		if err := validateColumnNames(names[0], names[1]); err == nil {
+			t.Errorf("invalid column names %q and %q were accepted", names[0], names[1])
+		}
 	}
 }
 
@@ -127,6 +149,51 @@ func TestHistogramIncludesBoundaryValues(t *testing.T) {
 	}
 }
 
+func TestHistogramDoesNotPileOverflowIntoLastBin(t *testing.T) {
+	counts := histogram([]float64{1, 2, 30}, 3, 2)
+	if counts[0] != 0 || counts[1] != 1 || counts[2] != 1 {
+		t.Fatalf("unexpected histogram with overflow: %v", counts)
+	}
+}
+
+func TestPercentileCanExcludeRareSpike(t *testing.T) {
+	values := make([]float64, 200)
+	for i := range values {
+		values[i] = float64(i)
+	}
+	values[199] = 1000
+	if got := percentile(values, 0.995); got != 198 {
+		t.Fatalf("99.5th percentile = %v, want 198", got)
+	}
+	if count := countAbove(values, 198); count != 1 {
+		t.Fatalf("countAbove() = %d, want 1", count)
+	}
+}
+
+func TestFormatAxisValueHidesFloatRoundingArtifacts(t *testing.T) {
+	tests := []struct {
+		value float64
+		want  string
+	}{
+		{value: 55.00000000000001, want: "55"},
+		{value: 12.5, want: "12.5"},
+		{value: 0.05, want: "0.05"},
+		{value: 100, want: "100"},
+	}
+	for _, test := range tests {
+		if got := formatAxisValue(test.value); got != test.want {
+			t.Errorf("formatAxisValue(%v) = %q, want %q", test.value, got, test.want)
+		}
+	}
+}
+
+func TestNiceAxisRangeAdaptsToSmallValues(t *testing.T) {
+	maxValue, step := niceAxisRange(0.63)
+	if math.Abs(maxValue-0.7) > 1e-12 || math.Abs(step-0.1) > 1e-12 {
+		t.Fatalf("niceAxisRange(0.63) = (%v, %v), want (0.7, 0.1)", maxValue, step)
+	}
+}
+
 func TestSmoothHistogramPreservesSampleWeight(t *testing.T) {
 	smoothed := smoothHistogram([]int{0, 0, 10, 0, 0}, 1.8)
 	total := 0.0
@@ -179,7 +246,7 @@ func TestCSVSampleCanBeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if _, err := readFrameTimes(file); err != nil {
+	if _, err := readFrameTimes(file, cpuColumn, gpuColumn); err != nil {
 		t.Fatal(err)
 	}
 }

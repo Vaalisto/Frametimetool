@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"io"
 	"math"
+	"sort"
 	"unicode/utf8"
 )
 
@@ -43,26 +44,28 @@ func writeChart(output io.Writer, times frameTimes, binCount int, title string) 
 		return err
 	}
 
-	maxTime := 0.0
+	allTimes := make([]float64, 0, len(times.cpuMS)+len(times.gpuMS))
 	for _, series := range [][]float64{times.cpuMS, times.gpuMS} {
 		for _, value := range series {
 			if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
 				return fmt.Errorf("frame times must be finite, non-negative numbers")
 			}
-			maxTime = math.Max(maxTime, value)
+			allTimes = append(allTimes, value)
 		}
 	}
-	// Keep the same useful 0-30 ms view as the reference for typical frametimes,
-	// but expand the axis automatically when an input contains slower frames.
-	axisMax := maxTime
+	// Use a high percentile so a few unusually slow frames do not flatten the
+	// useful distribution. Samples beyond the displayed range are reported.
+	axisMax := percentile(allTimes, 0.995)
 	if axisMax <= math.MaxFloat64/1.05 {
 		axisMax *= 1.05
 	}
-	xMax := math.Max(30, niceCeiling(axisMax))
+	xMax, xStep := niceAxisRange(axisMax)
 	cpuBins := smoothHistogram(histogram(times.cpuMS, binCount, xMax), 1.8)
 	gpuBins := smoothHistogram(histogram(times.gpuMS, binCount, xMax), 1.8)
 	cpuPercent := toPercent(cpuBins, len(times.cpuMS))
 	gpuPercent := toPercent(gpuBins, len(times.gpuMS))
+	cpuOverflow := countAbove(times.cpuMS, xMax)
+	gpuOverflow := countAbove(times.gpuMS, xMax)
 	peakPercent := 0.0
 	for i := range cpuPercent {
 		peakPercent = math.Max(peakPercent, cpuPercent[i])
@@ -95,17 +98,15 @@ func writeChart(output io.Writer, times frameTimes, binCount int, title string) 
 		label := formatPercent(yMax * float64(tick) / 10)
 		drawTextAt(canvas, plotLeft-12-textWidth(label, 2), y-7, label, 2, textColor)
 	}
-	tickCount := 30
-	if xMax > 40 && xMax <= 80 {
-		tickCount = 25
-	} else if xMax > 80 {
-		tickCount = 20
-	}
+	tickCount := int(math.Round(xMax / xStep))
 	for tick := 0; tick <= tickCount; tick++ {
-		value := xMax * (float64(tick) / float64(tickCount))
+		value := float64(tick) * xStep
+		if tick == tickCount {
+			value = xMax
+		}
 		x := plotLeft + int(math.Round(value/xMax*plotWidth))
 		drawLineAt(canvas, x, plotTop, x, plotBottom, gridColor)
-		label := fmt.Sprintf("%g", value)
+		label := formatAxisValue(value)
 		drawTextAt(canvas, x-textWidth(label, 2)/2, plotBottom+8, label, 2, textColor)
 	}
 	drawLineAt(canvas, plotLeft, plotBottom, plotRight, plotBottom, axisColor)
@@ -115,6 +116,7 @@ func writeChart(output io.Writer, times frameTimes, binCount int, title string) 
 	drawTextVerticalAt(canvas, 20, plotTop+plotHeight/2-textWidth("% OF FRAMES", 2)/2,
 		"% OF FRAMES", 2, textColor)
 	drawLegend(canvas, plotRight+42, plotTop+16)
+	drawOverflowNotes(canvas, plotRight+42, plotTop+90, xMax, cpuOverflow, gpuOverflow)
 
 	return png.Encode(output, downsample(canvas))
 }
@@ -122,6 +124,9 @@ func writeChart(output io.Writer, times frameTimes, binCount int, title string) 
 func histogram(values []float64, bins int, maxValue float64) []int {
 	counts := make([]int, bins)
 	for _, value := range values {
+		if value > maxValue {
+			continue
+		}
 		index := int(value / maxValue * float64(bins))
 		if index >= bins {
 			index = bins - 1
@@ -132,6 +137,32 @@ func histogram(values []float64, bins int, maxValue float64) []int {
 		counts[index]++
 	}
 	return counts
+}
+
+func percentile(values []float64, percentile float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+	index := int(math.Ceil(percentile*float64(len(sorted)))) - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(sorted) {
+		index = len(sorted) - 1
+	}
+	return sorted[index]
+}
+
+func countAbove(values []float64, maxValue float64) int {
+	count := 0
+	for _, value := range values {
+		if value > maxValue {
+			count++
+		}
+	}
+	return count
 }
 
 func smoothHistogram(counts []int, sigma float64) []float64 {
@@ -208,11 +239,41 @@ func niceCeiling(value float64) float64 {
 	return ceiling
 }
 
+func niceAxisRange(dataMax float64) (maxValue, step float64) {
+	if dataMax <= 0 || math.IsNaN(dataMax) || math.IsInf(dataMax, 0) {
+		dataMax = 1
+	}
+	step = niceCeiling(dataMax / 8)
+	maxValue = math.Ceil(dataMax/step) * step
+	if math.IsInf(maxValue, 0) || maxValue < dataMax {
+		return dataMax, dataMax / 8
+	}
+	return maxValue, step
+}
+
 func formatPercent(value float64) string {
 	if value == math.Round(value) {
 		return fmt.Sprintf("%.0f", value)
 	}
 	return fmt.Sprintf("%.1f", value)
+}
+
+func formatAxisValue(value float64) string {
+	if math.Abs(value) >= 1e12 {
+		return fmt.Sprintf("%.5g", value)
+	}
+	rounded := math.Round(value)
+	if math.Abs(value-rounded) <= 1e-9*math.Max(1, math.Abs(value)) {
+		return fmt.Sprintf("%.0f", rounded)
+	}
+	for decimals := 1; decimals <= 6; decimals++ {
+		factor := math.Pow10(decimals)
+		rounded = math.Round(value*factor) / factor
+		if math.Abs(value-rounded) <= 1e-9*math.Max(1, math.Abs(value)) {
+			return fmt.Sprintf("%.*f", decimals, rounded)
+		}
+	}
+	return fmt.Sprintf("%.6g", value)
 }
 
 func drawFilledCurve(canvas *image.RGBA, values []float64, yMax float64, fill color.RGBA) {
@@ -254,6 +315,18 @@ func drawLegend(canvas *image.RGBA, x, y int) {
 	drawTextAt(canvas, x+34, y, "GPU FRAMETIME", 2, textColor)
 	drawThickLineAt(canvas, x, y+37, x+25, y+37, cpuColor)
 	drawTextAt(canvas, x+34, y+28, "CPU FRAMETIME", 2, textColor)
+}
+
+func drawOverflowNotes(canvas *image.RGBA, x, y int, maxValue float64, cpuCount, gpuCount int) {
+	if cpuCount > 0 {
+		note := fmt.Sprintf("CPU >%s MS: %d", formatAxisValue(maxValue), cpuCount)
+		drawTextAt(canvas, x, y, note, 1, cpuColor)
+		y += 20
+	}
+	if gpuCount > 0 {
+		note := fmt.Sprintf("GPU >%s MS: %d", formatAxisValue(maxValue), gpuCount)
+		drawTextAt(canvas, x, y, note, 1, gpuColor)
+	}
 }
 
 func drawLineAt(canvas *image.RGBA, x0, y0, x1, y1 int, c color.RGBA) {
@@ -396,6 +469,7 @@ var glyphs = map[rune][7]string{
 	')':  {"01100", "00110", "00011", "00011", "00011", "00110", "01100"},
 	'%':  {"11001", "11010", "00100", "00100", "01011", "10011", "00000"},
 	'&':  {"01100", "10010", "10100", "01000", "10101", "10010", "01101"},
+	'>':  {"10000", "01000", "00100", "00010", "00100", "01000", "10000"},
 	'!':  {"00100", "00100", "00100", "00100", "00100", "00000", "00100"},
 	'+':  {"00000", "00100", "00100", "11111", "00100", "00100", "00000"},
 	',':  {"00000", "00000", "00000", "00000", "00110", "00100", "01000"},

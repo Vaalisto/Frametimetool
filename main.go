@@ -28,6 +28,8 @@ type frameTimes struct {
 func main() {
 	inputPath := flag.String("f", "", "required CSV file containing frame timings")
 	flag.StringVar(inputPath, "input", "", "alias for -f")
+	cpuHeader := flag.String("cpu", cpuColumn, "CSV column containing render CPU time")
+	gpuHeader := flag.String("gpu", gpuColumn, "CSV column containing render GPU time")
 	title := flag.String("t", "", "optional chart title")
 	outputPath := flag.String("o", "distribution.png", "PNG chart output path (.png is added if omitted)")
 	flag.StringVar(outputPath, "output", "distribution.png", "alias for -o")
@@ -46,8 +48,11 @@ func main() {
 	if len(flag.Args()) != 0 {
 		fatalf("unexpected positional argument %q; use -f to select the CSV file", flag.Arg(0))
 	}
-	if err := validatePathCharacters(*inputPath); err != nil {
+	if err := validateNoControlCharacters(*inputPath); err != nil {
 		fatalf("-f: %v", err)
+	}
+	if err := validateColumnNames(*cpuHeader, *gpuHeader); err != nil {
+		fatalf("CSV columns: %v", err)
 	}
 
 	if *bins < 1 || *bins > 5000 {
@@ -85,7 +90,7 @@ func main() {
 		fatalf("unsafe output path: %v", err)
 	}
 
-	times, err := readFrameTimes(input)
+	times, err := readFrameTimes(input, *cpuHeader, *gpuHeader)
 	if err != nil {
 		fatalf("read CSV: %v", err)
 	}
@@ -106,7 +111,7 @@ func ensurePNGExtension(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("output filename cannot be empty")
 	}
-	if err := validatePathCharacters(path); err != nil {
+	if err := validateNoControlCharacters(path); err != nil {
 		return "", err
 	}
 	if strings.HasSuffix(path, "/") || strings.HasSuffix(path, `\`) {
@@ -122,10 +127,10 @@ func ensurePNGExtension(path string) (string, error) {
 	return path, nil
 }
 
-func validatePathCharacters(path string) error {
-	for _, char := range path {
+func validateNoControlCharacters(value string) error {
+	for _, char := range value {
 		if unicode.IsControl(char) {
-			return fmt.Errorf("path cannot contain control characters")
+			return fmt.Errorf("value cannot contain control characters")
 		}
 	}
 	return nil
@@ -142,6 +147,25 @@ func validateTitle(title string) (string, error) {
 		}
 	}
 	return title, nil
+}
+
+func validateColumnNames(cpuName, gpuName string) error {
+	if strings.TrimSpace(cpuName) == "" {
+		return fmt.Errorf("-cpu column name cannot be empty")
+	}
+	if strings.TrimSpace(gpuName) == "" {
+		return fmt.Errorf("-gpu column name cannot be empty")
+	}
+	if err := validateNoControlCharacters(cpuName); err != nil {
+		return fmt.Errorf("-cpu column name: %w", err)
+	}
+	if err := validateNoControlCharacters(gpuName); err != nil {
+		return fmt.Errorf("-gpu column name: %w", err)
+	}
+	if cpuName == gpuName {
+		return fmt.Errorf("-cpu and -gpu must name different columns")
+	}
+	return nil
 }
 
 func checkOutputTarget(input *os.File, outputPath string) error {
@@ -196,7 +220,10 @@ func fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
-func readFrameTimes(input io.Reader) (frameTimes, error) {
+func readFrameTimes(input io.Reader, cpuName, gpuName string) (frameTimes, error) {
+	if err := validateColumnNames(cpuName, gpuName); err != nil {
+		return frameTimes{}, err
+	}
 	reader := csv.NewReader(input)
 	header, err := reader.Read()
 	if err != nil {
@@ -207,15 +234,15 @@ func readFrameTimes(input io.Reader) (frameTimes, error) {
 	}
 	cpuIndex, gpuIndex := -1, -1
 	for i, name := range header {
-		if name == cpuColumn {
+		if name == cpuName {
 			cpuIndex = i
 		}
-		if name == gpuColumn {
+		if name == gpuName {
 			gpuIndex = i
 		}
 	}
 	if cpuIndex < 0 || gpuIndex < 0 {
-		return frameTimes{}, fmt.Errorf("CSV must contain columns %q and %q", cpuColumn, gpuColumn)
+		return frameTimes{}, fmt.Errorf("CSV must contain columns %q and %q", cpuName, gpuName)
 	}
 
 	var times frameTimes
@@ -231,11 +258,11 @@ func readFrameTimes(input io.Reader) (frameTimes, error) {
 		}
 		cpu, err := parseMicroseconds(record[cpuIndex])
 		if err != nil {
-			return frameTimes{}, fmt.Errorf("row %d, %s: %w", rowNumber, cpuColumn, err)
+			return frameTimes{}, fmt.Errorf("row %d, %s: %w", rowNumber, cpuName, err)
 		}
 		gpu, err := parseMicroseconds(record[gpuIndex])
 		if err != nil {
-			return frameTimes{}, fmt.Errorf("row %d, %s: %w", rowNumber, gpuColumn, err)
+			return frameTimes{}, fmt.Errorf("row %d, %s: %w", rowNumber, gpuName, err)
 		}
 		times.cpuMS = append(times.cpuMS, cpu/1000)
 		times.gpuMS = append(times.gpuMS, gpu/1000)
