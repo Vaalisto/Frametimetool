@@ -33,7 +33,7 @@ func main() {
 	title := flag.String("t", "", "optional chart title")
 	outputPath := flag.String("o", "distribution.png", "PNG chart output path (.png is added if omitted)")
 	flag.StringVar(outputPath, "output", "distribution.png", "alias for -o")
-	bins := flag.Int("bins", 800, "number of histogram bins")
+	bins := flag.Int("bins", 800, "number of histogram bins (2 to 5000)")
 	flag.Usage = printUsage
 	for _, arg := range os.Args[1:] {
 		if arg == "-?" {
@@ -55,8 +55,8 @@ func main() {
 		fatalf("CSV columns: %v", err)
 	}
 
-	if *bins < 1 || *bins > 5000 {
-		fatalf("-bins must be between 1 and 5000")
+	if *bins < 2 || *bins > 5000 {
+		fatalf("-bins must be between 2 and 5000")
 	}
 	normalizedOutputPath, err := ensurePNGExtension(*outputPath)
 	if err != nil {
@@ -144,6 +144,13 @@ func validateTitle(title string) (string, error) {
 	for _, char := range title {
 		if unicode.IsControl(char) {
 			return "", fmt.Errorf("title cannot contain control characters")
+		}
+		glyphChar := char
+		if glyphChar >= 'a' && glyphChar <= 'z' {
+			glyphChar -= 'a' - 'A'
+		}
+		if _, ok := glyphs[glyphChar]; !ok {
+			return "", fmt.Errorf("title contains unsupported character %q; use characters supported by the chart font", char)
 		}
 	}
 	return title, nil
@@ -235,9 +242,15 @@ func readFrameTimes(input io.Reader, cpuName, gpuName string) (frameTimes, error
 	cpuIndex, gpuIndex := -1, -1
 	for i, name := range header {
 		if name == cpuName {
+			if cpuIndex >= 0 {
+				return frameTimes{}, fmt.Errorf("CSV contains duplicate column %q", cpuName)
+			}
 			cpuIndex = i
 		}
 		if name == gpuName {
+			if gpuIndex >= 0 {
+				return frameTimes{}, fmt.Errorf("CSV contains duplicate column %q", gpuName)
+			}
 			gpuIndex = i
 		}
 	}

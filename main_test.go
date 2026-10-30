@@ -31,6 +31,14 @@ func TestReadFrameTimesRequiresColumns(t *testing.T) {
 	}
 }
 
+func TestReadFrameTimesRejectsDuplicateColumns(t *testing.T) {
+	input := "Render CPU (µs),Render CPU (µs),Render GPU (µs)\n1,2,3\n"
+	_, err := readFrameTimes(strings.NewReader(input), cpuColumn, gpuColumn)
+	if err == nil || !strings.Contains(err.Error(), "duplicate column") {
+		t.Fatalf("expected duplicate-column error, got %v", err)
+	}
+}
+
 func TestReadFrameTimesRejectsInvalidValues(t *testing.T) {
 	input := "Render CPU (µs),Render GPU (µs)\nnot-a-number,2\n"
 	_, err := readFrameTimes(strings.NewReader(input), cpuColumn, gpuColumn)
@@ -106,6 +114,9 @@ func TestValidateTitle(t *testing.T) {
 	if _, err := validateTitle(strings.Repeat("x", 201)); err == nil {
 		t.Fatal("expected overlong title to be rejected")
 	}
+	if _, err := validateTitle("Frametime – overview"); err == nil {
+		t.Fatal("expected unsupported title glyph to be rejected")
+	}
 }
 
 func TestCheckOutputTargetProtectsInput(t *testing.T) {
@@ -162,8 +173,8 @@ func TestPercentileCanExcludeRareSpike(t *testing.T) {
 		values[i] = float64(i)
 	}
 	values[199] = 1000
-	if got := percentile(values, 0.995); got != 198 {
-		t.Fatalf("99.5th percentile = %v, want 198", got)
+	if got := maxSeriesPercentile(0.995, values, []float64{10, 20}); got != 198 {
+		t.Fatalf("maximum per-series 99.5th percentile = %v, want 198", got)
 	}
 	if count := countAbove(values, 198); count != 1 {
 		t.Fatalf("countAbove() = %d, want 1", count)
@@ -237,6 +248,13 @@ func TestWriteChartRejectsInvalidFrameTimes(t *testing.T) {
 	times := frameTimes{cpuMS: []float64{math.NaN()}, gpuMS: []float64{1}}
 	if err := writeChart(&bytes.Buffer{}, times, 10, ""); err == nil {
 		t.Fatal("expected non-finite frame time to be rejected")
+	}
+}
+
+func TestWriteChartRejectsSingleBin(t *testing.T) {
+	times := frameTimes{cpuMS: []float64{1}, gpuMS: []float64{2}}
+	if err := writeChart(&bytes.Buffer{}, times, 1, ""); err == nil {
+		t.Fatal("expected a single-bin chart to be rejected")
 	}
 }
 
