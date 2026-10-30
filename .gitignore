@@ -1,2 +1,5 @@
 # Ignore built exe files
 *.exe
+
+# Ignore .png files that program outputs
+*.png
