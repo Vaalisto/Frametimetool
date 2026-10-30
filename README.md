@@ -2,22 +2,20 @@
 
 Reads frame timings from a CSV and writes a high-resolution PNG distribution chart comparing render CPU and GPU times. The dark chart uses a filled blue GPU distribution and a cyan CPU curve, with fine gridlines. Input values are in microseconds and are converted to milliseconds. The y-axis shows each bin's percentage of recorded frames.
 
-Run from the repository root:
+Run from the repository root and provide the required input CSV with `-f`:
 
 ```sh
-go run .
+go run . -f "resources/example data.csv"
 ```
 
-By default this reads `resources/example data.csv`, uses 800 histogram bins, and writes `distribution.png`. Pass a CSV path positionally to use another file:
+`-f` is mandatory. The output defaults to `distribution.png`, histogram resolution to 800 bins, and no title is shown unless `-t` is provided. For example:
 
 ```sh
-go run . "path/to/data.csv"
+go run . -f "path/to/data.csv" -t "My frametime chart" -o chart.png
 ```
 
-You can also use flags to select the input and output:
+Use `-?` to list and explain all flags. The long aliases `-input` and `-output` are also accepted. `-bins` controls histogram resolution.
 
-```sh
-go run . -input "path/to/data.csv" -output chart.png -bins 800
-```
+The output is always PNG: if `-o` has no extension, `.png` is appended; other extensions are rejected. The tool validates frame values, requires a regular input file, rejects control characters in paths/titles, limits titles to 200 characters, and refuses to overwrite the input CSV. Images are written through a temporary file before replacing the destination.
 
 Build and test with `go build .` and `go test ./...`. The project uses only the Go standard library.

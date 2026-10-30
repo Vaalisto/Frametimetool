@@ -5,6 +5,7 @@ import (
 	"image/png"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -23,33 +24,6 @@ func TestReadFrameTimesConvertsMicrosecondsToMilliseconds(t *testing.T) {
 	}
 }
 
-func TestResolveInputPath(t *testing.T) {
-	tests := []struct {
-		name      string
-		inputFlag string
-		args      []string
-		want      string
-		wantError bool
-	}{
-		{name: "default", want: defaultCSVPath},
-		{name: "positional", args: []string{"custom.csv"}, want: "custom.csv"},
-		{name: "input flag", inputFlag: "flag.csv", want: "flag.csv"},
-		{name: "conflicting paths", inputFlag: "flag.csv", args: []string{"arg.csv"}, wantError: true},
-		{name: "too many paths", args: []string{"one.csv", "two.csv"}, wantError: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := resolveInputPath(test.inputFlag, test.args)
-			if (err != nil) != test.wantError {
-				t.Fatalf("resolveInputPath() error = %v, wantError %v", err, test.wantError)
-			}
-			if err == nil && got != test.want {
-				t.Fatalf("resolveInputPath() = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
 func TestReadFrameTimesRequiresColumns(t *testing.T) {
 	_, err := readFrameTimes(strings.NewReader("CPU,GPU\n1,2\n"))
 	if err == nil || !strings.Contains(err.Error(), cpuColumn) || !strings.Contains(err.Error(), gpuColumn) {
@@ -62,6 +36,87 @@ func TestReadFrameTimesRejectsInvalidValues(t *testing.T) {
 	_, err := readFrameTimes(strings.NewReader(input))
 	if err == nil || !strings.Contains(err.Error(), "row 2") {
 		t.Fatalf("expected row-specific parse error, got %v", err)
+	}
+}
+
+func TestParseMicrosecondsRejectsUnsafeNumbers(t *testing.T) {
+	for _, value := range []string{"-1", "NaN", "+Inf"} {
+		if _, err := parseMicroseconds(value); err == nil {
+			t.Errorf("parseMicroseconds(%q) unexpectedly succeeded", value)
+		}
+	}
+}
+
+func TestEnsurePNGExtension(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		want      string
+		wantError bool
+	}{
+		{name: "append missing extension", path: "chart", want: "chart.png"},
+		{name: "preserve png extension", path: "chart.PNG", want: "chart.PNG"},
+		{name: "reject different image type", path: "chart.jpg", wantError: true},
+		{name: "reject empty output", path: "", wantError: true},
+		{name: "reject control character", path: "bad\nname", wantError: true},
+		{name: "reject directory path", path: "folder/", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ensurePNGExtension(test.path)
+			if (err != nil) != test.wantError {
+				t.Fatalf("ensurePNGExtension() error = %v, wantError %v", err, test.wantError)
+			}
+			if err == nil && got != test.want {
+				t.Fatalf("ensurePNGExtension() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateTitle(t *testing.T) {
+	if got, err := validateTitle("  Test chart  "); err != nil || got != "Test chart" {
+		t.Fatalf("validateTitle() = %q, %v", got, err)
+	}
+	if _, err := validateTitle("bad\nname"); err == nil {
+		t.Fatal("expected control characters in title to be rejected")
+	}
+	if _, err := validateTitle(strings.Repeat("x", 201)); err == nil {
+		t.Fatal("expected overlong title to be rejected")
+	}
+}
+
+func TestCheckOutputTargetProtectsInput(t *testing.T) {
+	inputPath := filepath.Join(t.TempDir(), "source.csv")
+	input, err := os.Create(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	if err := checkOutputTarget(input, inputPath); err == nil {
+		t.Fatal("expected output collision with input to be rejected")
+	}
+	if err := checkOutputTarget(input, filepath.Join(filepath.Dir(inputPath), "chart.png")); err != nil {
+		t.Fatalf("unexpected error for separate output path: %v", err)
+	}
+}
+
+func TestSaveChartFileWritesPNGWithExtension(t *testing.T) {
+	outputPath, err := ensurePNGExtension(filepath.Join(t.TempDir(), "chart"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	times := frameTimes{cpuMS: []float64{1, 2, 3}, gpuMS: []float64{4, 5, 6}}
+	if err := saveChartFile(outputPath, times, 10, "Safe chart"); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := png.Decode(file); err != nil {
+		t.Fatalf("saved file is not a PNG: %v", err)
 	}
 }
 
@@ -89,11 +144,32 @@ func TestSmoothHistogramPreservesSampleWeight(t *testing.T) {
 func TestWriteChartProducesPNG(t *testing.T) {
 	var output bytes.Buffer
 	times := frameTimes{cpuMS: []float64{1, 2, 3}, gpuMS: []float64{4, 5, 6}}
-	if err := writeChart(&output, times, 10); err != nil {
+	if err := writeChart(&output, times, 10, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := png.Decode(&output); err != nil {
 		t.Fatalf("output is not a valid PNG: %v", err)
+	}
+}
+
+func TestWriteChartIncludesOptionalTitle(t *testing.T) {
+	times := frameTimes{cpuMS: []float64{1, 2, 3}, gpuMS: []float64{4, 5, 6}}
+	var withoutTitle, withTitle bytes.Buffer
+	if err := writeChart(&withoutTitle, times, 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeChart(&withTitle, times, 10, "My Frametime Chart"); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(withoutTitle.Bytes(), withTitle.Bytes()) {
+		t.Fatal("title did not change rendered chart")
+	}
+}
+
+func TestWriteChartRejectsInvalidFrameTimes(t *testing.T) {
+	times := frameTimes{cpuMS: []float64{math.NaN()}, gpuMS: []float64{1}}
+	if err := writeChart(&bytes.Buffer{}, times, 10, ""); err == nil {
+		t.Fatal("expected non-finite frame time to be rejected")
 	}
 }
 

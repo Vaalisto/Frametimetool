@@ -8,14 +8,16 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
-	cpuColumn      = "Render CPU (µs)"
-	gpuColumn      = "Render GPU (µs)"
-	defaultCSVPath = "resources/example data.csv"
+	cpuColumn = "Render CPU (µs)"
+	gpuColumn = "Render GPU (µs)"
 )
 
 type frameTimes struct {
@@ -24,59 +26,169 @@ type frameTimes struct {
 }
 
 func main() {
-	inputPathFlag := flag.String("input", "", "CSV file containing frame timings (positional path is also supported)")
-	outputPath := flag.String("output", "distribution.png", "PNG chart output path")
+	inputPath := flag.String("f", "", "required CSV file containing frame timings")
+	flag.StringVar(inputPath, "input", "", "alias for -f")
+	title := flag.String("t", "", "optional chart title")
+	outputPath := flag.String("o", "distribution.png", "PNG chart output path (.png is added if omitted)")
+	flag.StringVar(outputPath, "output", "distribution.png", "alias for -o")
 	bins := flag.Int("bins", 800, "number of histogram bins")
+	flag.Usage = printUsage
+	for _, arg := range os.Args[1:] {
+		if arg == "-?" {
+			printUsage()
+			return
+		}
+	}
 	flag.Parse()
-	inputPath, err := resolveInputPath(*inputPathFlag, flag.Args())
-	if err != nil {
-		fatalf("%v", err)
+	if *inputPath == "" {
+		fatalf("-f is mandatory; use -? to see usage and all available flags")
+	}
+	if len(flag.Args()) != 0 {
+		fatalf("unexpected positional argument %q; use -f to select the CSV file", flag.Arg(0))
+	}
+	if err := validatePathCharacters(*inputPath); err != nil {
+		fatalf("-f: %v", err)
 	}
 
 	if *bins < 1 || *bins > 5000 {
 		fatalf("-bins must be between 1 and 5000")
 	}
-
-	input, err := os.Open(inputPath)
+	normalizedOutputPath, err := ensurePNGExtension(*outputPath)
 	if err != nil {
-		fatalf("open input %q: %v", inputPath, err)
+		fatalf("-o: %v", err)
+	}
+	titleText, err := validateTitle(*title)
+	if err != nil {
+		fatalf("-t: %v", err)
+	}
+
+	inputInfo, err := os.Stat(*inputPath)
+	if err != nil {
+		fatalf("inspect input %q: %v", *inputPath, err)
+	}
+	if !inputInfo.Mode().IsRegular() {
+		fatalf("input %q must be a regular file", *inputPath)
+	}
+	input, err := os.Open(*inputPath)
+	if err != nil {
+		fatalf("open input %q: %v", *inputPath, err)
 	}
 	defer input.Close()
+	openedInfo, err := input.Stat()
+	if err != nil {
+		fatalf("inspect opened input %q: %v", *inputPath, err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(inputInfo, openedInfo) {
+		fatalf("input %q changed while being opened; retry with a stable regular file", *inputPath)
+	}
+	if err := checkOutputTarget(input, normalizedOutputPath); err != nil {
+		fatalf("unsafe output path: %v", err)
+	}
 
 	times, err := readFrameTimes(input)
 	if err != nil {
 		fatalf("read CSV: %v", err)
 	}
 
-	output, err := os.Create(*outputPath)
-	if err != nil {
-		fatalf("create output: %v", err)
-	}
-	if err := writeChart(output, times, *bins); err != nil {
-		output.Close()
+	if err := saveChartFile(normalizedOutputPath, times, *bins, titleText); err != nil {
 		fatalf("write chart: %v", err)
 	}
-	if err := output.Close(); err != nil {
-		fatalf("close output: %v", err)
-	}
 
-	fmt.Printf("Wrote %s (%d frames)\n", *outputPath, len(times.cpuMS))
+	fmt.Printf("Wrote %s (%d frames)\n", normalizedOutputPath, len(times.cpuMS))
 }
 
-func resolveInputPath(inputFlag string, args []string) (string, error) {
-	if len(args) > 1 {
-		return "", fmt.Errorf("expected at most one positional CSV path")
+func printUsage() {
+	fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s -f <input.csv> [flags]\n\nFlags:\n", filepath.Base(os.Args[0]))
+	flag.PrintDefaults()
+}
+
+func ensurePNGExtension(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("output filename cannot be empty")
 	}
-	if inputFlag != "" && len(args) != 0 {
-		return "", fmt.Errorf("provide the CSV path either positionally or with -input, not both")
+	if err := validatePathCharacters(path); err != nil {
+		return "", err
 	}
-	if inputFlag != "" {
-		return inputFlag, nil
+	if strings.HasSuffix(path, "/") || strings.HasSuffix(path, `\`) {
+		return "", fmt.Errorf("output path must include a filename")
 	}
-	if len(args) == 1 {
-		return args[0], nil
+	extension := filepath.Ext(path)
+	if extension == "" {
+		return path + ".png", nil
 	}
-	return defaultCSVPath, nil
+	if !strings.EqualFold(extension, ".png") {
+		return "", fmt.Errorf("output must be a PNG file (.png), got %q", extension)
+	}
+	return path, nil
+}
+
+func validatePathCharacters(path string) error {
+	for _, char := range path {
+		if unicode.IsControl(char) {
+			return fmt.Errorf("path cannot contain control characters")
+		}
+	}
+	return nil
+}
+
+func validateTitle(title string) (string, error) {
+	title = strings.TrimSpace(title)
+	if utf8.RuneCountInString(title) > 200 {
+		return "", fmt.Errorf("title must be 200 characters or fewer")
+	}
+	for _, char := range title {
+		if unicode.IsControl(char) {
+			return "", fmt.Errorf("title cannot contain control characters")
+		}
+	}
+	return title, nil
+}
+
+func checkOutputTarget(input *os.File, outputPath string) error {
+	inputInfo, err := input.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect input file: %w", err)
+	}
+	outputInfo, err := os.Stat(outputPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect output file: %w", err)
+	}
+	if os.SameFile(inputInfo, outputInfo) {
+		return fmt.Errorf("output would overwrite the input CSV")
+	}
+	if !outputInfo.Mode().IsRegular() {
+		return fmt.Errorf("existing output is not a regular file")
+	}
+	return nil
+}
+
+func saveChartFile(path string, times frameTimes, bins int, title string) error {
+	directory := filepath.Dir(path)
+	temp, err := os.CreateTemp(directory, ".frametimetool-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary image: %w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+
+	if err := writeChart(temp, times, bins, title); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return fmt.Errorf("flush image: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close image: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace output image: %w", err)
+	}
+	return nil
 }
 
 func fatalf(format string, args ...any) {

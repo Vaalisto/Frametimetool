@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"io"
 	"math"
+	"unicode/utf8"
 )
 
 const (
@@ -29,24 +30,35 @@ var (
 	gpuColor   = color.RGBA{R: 0, G: 0, B: 255, A: 255}
 )
 
-func writeChart(output io.Writer, times frameTimes, binCount int) error {
+func writeChart(output io.Writer, times frameTimes, binCount int, title string) error {
 	if binCount < 1 || binCount > 5000 {
 		return fmt.Errorf("bin count must be between 1 and 5000")
 	}
 	if len(times.cpuMS) == 0 || len(times.cpuMS) != len(times.gpuMS) {
 		return fmt.Errorf("CPU and GPU timings must have the same non-zero number of frames")
 	}
+	var err error
+	title, err = validateTitle(title)
+	if err != nil {
+		return err
+	}
 
 	maxTime := 0.0
-	for _, value := range times.cpuMS {
-		maxTime = math.Max(maxTime, value)
-	}
-	for _, value := range times.gpuMS {
-		maxTime = math.Max(maxTime, value)
+	for _, series := range [][]float64{times.cpuMS, times.gpuMS} {
+		for _, value := range series {
+			if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+				return fmt.Errorf("frame times must be finite, non-negative numbers")
+			}
+			maxTime = math.Max(maxTime, value)
+		}
 	}
 	// Keep the same useful 0-30 ms view as the reference for typical frametimes,
 	// but expand the axis automatically when an input contains slower frames.
-	xMax := math.Max(30, niceCeiling(maxTime*1.05))
+	axisMax := maxTime
+	if axisMax <= math.MaxFloat64/1.05 {
+		axisMax *= 1.05
+	}
+	xMax := math.Max(30, niceCeiling(axisMax))
 	cpuBins := smoothHistogram(histogram(times.cpuMS, binCount, xMax), 1.8)
 	gpuBins := smoothHistogram(histogram(times.gpuMS, binCount, xMax), 1.8)
 	cpuPercent := toPercent(cpuBins, len(times.cpuMS))
@@ -63,8 +75,13 @@ func writeChart(output io.Writer, times frameTimes, binCount int) error {
 
 	canvas := image.NewRGBA(image.Rect(0, 0, chartWidth*renderScale, chartHeight*renderScale))
 	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: background}, image.Point{}, draw.Src)
-	drawTextAt(canvas, (chartWidth-textWidth("DISTRIBUTION OF GPU & CPU FRAMETIME", 2))/2, 22,
-		"DISTRIBUTION OF GPU & CPU FRAMETIME", 2, textColor)
+	if title != "" {
+		titleScale := 2
+		if textWidth(title, titleScale) > chartWidth-80 {
+			titleScale = 1
+		}
+		drawTextAt(canvas, (chartWidth-textWidth(title, titleScale))/2, 22, title, titleScale, textColor)
+	}
 
 	plotRight := plotLeft + plotWidth
 	plotBottom := plotTop + plotHeight
@@ -78,14 +95,14 @@ func writeChart(output io.Writer, times frameTimes, binCount int) error {
 		label := formatPercent(yMax * float64(tick) / 10)
 		drawTextAt(canvas, plotLeft-12-textWidth(label, 2), y-7, label, 2, textColor)
 	}
-	xStep := 1.0
-	if xMax > 40 {
-		xStep = 2
+	tickCount := 30
+	if xMax > 40 && xMax <= 80 {
+		tickCount = 25
+	} else if xMax > 80 {
+		tickCount = 20
 	}
-	if xMax > 80 {
-		xStep = 5
-	}
-	for value := 0.0; value <= xMax; value += xStep {
+	for tick := 0; tick <= tickCount; tick++ {
+		value := xMax * (float64(tick) / float64(tickCount))
 		x := plotLeft + int(math.Round(value/xMax*plotWidth))
 		drawLineAt(canvas, x, plotTop, x, plotBottom, gridColor)
 		label := fmt.Sprintf("%g", value)
@@ -173,18 +190,22 @@ func niceCeiling(value float64) float64 {
 	}
 	power := math.Pow(10, math.Floor(math.Log10(value)))
 	normalized := value / power
+	factor := 10.0
 	switch {
 	case normalized <= 1:
-		return power
+		factor = 1
 	case normalized <= 2:
-		return 2 * power
+		factor = 2
 	case normalized <= 2.5:
-		return 2.5 * power
+		factor = 2.5
 	case normalized <= 5:
-		return 5 * power
-	default:
-		return 10 * power
+		factor = 5
 	}
+	ceiling := factor * power
+	if math.IsInf(ceiling, 0) {
+		return value
+	}
+	return ceiling
 }
 
 func formatPercent(value float64) string {
@@ -283,9 +304,13 @@ func drawTextVerticalAt(canvas *image.RGBA, x, y int, text string, scale int, c 
 
 func drawText(canvas *image.RGBA, x, y int, text string, scale int, c color.RGBA) {
 	for _, char := range text {
-		glyph := glyphs[char]
+		glyph, ok := glyphs[char]
 		if char >= 'a' && char <= 'z' {
 			glyph = glyphs[char-'a'+'A']
+			ok = true
+		}
+		if !ok {
+			glyph = glyphs['?']
 		}
 		for row, pixels := range glyph {
 			for col, pixel := range pixels {
@@ -326,10 +351,11 @@ func fillTextPixel(canvas *image.RGBA, x, y, scale int, c color.RGBA) {
 }
 
 func textWidth(text string, scale int) int {
-	if len(text) == 0 {
+	charCount := utf8.RuneCountInString(text)
+	if charCount == 0 {
 		return 0
 	}
-	return (len(text)*6 - 1) * scale
+	return (charCount*6 - 1) * scale
 }
 
 func downsample(source *image.RGBA) *image.RGBA {
@@ -365,38 +391,54 @@ func abs(value int) int {
 }
 
 var glyphs = map[rune][7]string{
-	' ': {"00000", "00000", "00000", "00000", "00000", "00000", "00000"},
-	'(': {"00110", "01100", "11000", "11000", "11000", "01100", "00110"},
-	')': {"01100", "00110", "00011", "00011", "00011", "00110", "01100"},
-	'%': {"11001", "11010", "00100", "00100", "01011", "10011", "00000"},
-	'&': {"01100", "10010", "10100", "01000", "10101", "10010", "01101"},
-	'.': {"00000", "00000", "00000", "00000", "00000", "01100", "01100"},
-	'0': {"01110", "10001", "10011", "10101", "11001", "10001", "01110"},
-	'1': {"00100", "01100", "00100", "00100", "00100", "00100", "01110"},
-	'2': {"01110", "10001", "00001", "00010", "00100", "01000", "11111"},
-	'3': {"11110", "00001", "00001", "01110", "00001", "00001", "11110"},
-	'4': {"00010", "00110", "01010", "10010", "11111", "00010", "00010"},
-	'5': {"11111", "10000", "10000", "11110", "00001", "00001", "11110"},
-	'6': {"01110", "10000", "10000", "11110", "10001", "10001", "01110"},
-	'7': {"11111", "00001", "00010", "00100", "01000", "01000", "01000"},
-	'8': {"01110", "10001", "10001", "01110", "10001", "10001", "01110"},
-	'9': {"01110", "10001", "10001", "01111", "00001", "00001", "01110"},
-	'A': {"01110", "10001", "10001", "11111", "10001", "10001", "10001"},
-	'B': {"11110", "10001", "10001", "11110", "10001", "10001", "11110"},
-	'C': {"01110", "10001", "10000", "10000", "10000", "10001", "01110"},
-	'D': {"11100", "10010", "10001", "10001", "10001", "10010", "11100"},
-	'E': {"11111", "10000", "10000", "11110", "10000", "10000", "11111"},
-	'F': {"11111", "10000", "10000", "11110", "10000", "10000", "10000"},
-	'G': {"01110", "10001", "10000", "10111", "10001", "10001", "01110"},
-	'H': {"10001", "10001", "10001", "11111", "10001", "10001", "10001"},
-	'I': {"01110", "00100", "00100", "00100", "00100", "00100", "01110"},
-	'M': {"10001", "11011", "10101", "10101", "10001", "10001", "10001"},
-	'N': {"10001", "11001", "11001", "10101", "10011", "10011", "10001"},
-	'O': {"01110", "10001", "10001", "10001", "10001", "10001", "01110"},
-	'P': {"11110", "10001", "10001", "11110", "10000", "10000", "10000"},
-	'R': {"11110", "10001", "10001", "11110", "10100", "10010", "10001"},
-	'S': {"01111", "10000", "10000", "01110", "00001", "00001", "11110"},
-	'T': {"11111", "00100", "00100", "00100", "00100", "00100", "00100"},
-	'U': {"10001", "10001", "10001", "10001", "10001", "10001", "01110"},
-	'Y': {"10001", "10001", "01010", "00100", "00100", "00100", "00100"},
+	' ':  {"00000", "00000", "00000", "00000", "00000", "00000", "00000"},
+	'(':  {"00110", "01100", "11000", "11000", "11000", "01100", "00110"},
+	')':  {"01100", "00110", "00011", "00011", "00011", "00110", "01100"},
+	'%':  {"11001", "11010", "00100", "00100", "01011", "10011", "00000"},
+	'&':  {"01100", "10010", "10100", "01000", "10101", "10010", "01101"},
+	'!':  {"00100", "00100", "00100", "00100", "00100", "00000", "00100"},
+	'+':  {"00000", "00100", "00100", "11111", "00100", "00100", "00000"},
+	',':  {"00000", "00000", "00000", "00000", "00110", "00100", "01000"},
+	'-':  {"00000", "00000", "00000", "11111", "00000", "00000", "00000"},
+	'.':  {"00000", "00000", "00000", "00000", "00000", "01100", "01100"},
+	'/':  {"00001", "00010", "00010", "00100", "01000", "01000", "10000"},
+	':':  {"00000", "00100", "00100", "00000", "00100", "00100", "00000"},
+	'?':  {"01110", "10001", "00001", "00010", "00100", "00000", "00100"},
+	'\'': {"00100", "00100", "00000", "00000", "00000", "00000", "00000"},
+	'0':  {"01110", "10001", "10011", "10101", "11001", "10001", "01110"},
+	'1':  {"00100", "01100", "00100", "00100", "00100", "00100", "01110"},
+	'2':  {"01110", "10001", "00001", "00010", "00100", "01000", "11111"},
+	'3':  {"11110", "00001", "00001", "01110", "00001", "00001", "11110"},
+	'4':  {"00010", "00110", "01010", "10010", "11111", "00010", "00010"},
+	'5':  {"11111", "10000", "10000", "11110", "00001", "00001", "11110"},
+	'6':  {"01110", "10000", "10000", "11110", "10001", "10001", "01110"},
+	'7':  {"11111", "00001", "00010", "00100", "01000", "01000", "01000"},
+	'8':  {"01110", "10001", "10001", "01110", "10001", "10001", "01110"},
+	'9':  {"01110", "10001", "10001", "01111", "00001", "00001", "01110"},
+	'A':  {"01110", "10001", "10001", "11111", "10001", "10001", "10001"},
+	'B':  {"11110", "10001", "10001", "11110", "10001", "10001", "11110"},
+	'C':  {"01110", "10001", "10000", "10000", "10000", "10001", "01110"},
+	'D':  {"11100", "10010", "10001", "10001", "10001", "10010", "11100"},
+	'E':  {"11111", "10000", "10000", "11110", "10000", "10000", "11111"},
+	'F':  {"11111", "10000", "10000", "11110", "10000", "10000", "10000"},
+	'G':  {"01110", "10001", "10000", "10111", "10001", "10001", "01110"},
+	'H':  {"10001", "10001", "10001", "11111", "10001", "10001", "10001"},
+	'I':  {"01110", "00100", "00100", "00100", "00100", "00100", "01110"},
+	'J':  {"00111", "00010", "00010", "00010", "00010", "10010", "01100"},
+	'K':  {"10001", "10010", "10100", "11000", "10100", "10010", "10001"},
+	'L':  {"10000", "10000", "10000", "10000", "10000", "10000", "11111"},
+	'M':  {"10001", "11011", "10101", "10101", "10001", "10001", "10001"},
+	'N':  {"10001", "11001", "11001", "10101", "10011", "10011", "10001"},
+	'O':  {"01110", "10001", "10001", "10001", "10001", "10001", "01110"},
+	'P':  {"11110", "10001", "10001", "11110", "10000", "10000", "10000"},
+	'Q':  {"01110", "10001", "10001", "10001", "10101", "10010", "01101"},
+	'R':  {"11110", "10001", "10001", "11110", "10100", "10010", "10001"},
+	'S':  {"01111", "10000", "10000", "01110", "00001", "00001", "11110"},
+	'T':  {"11111", "00100", "00100", "00100", "00100", "00100", "00100"},
+	'U':  {"10001", "10001", "10001", "10001", "10001", "10001", "01110"},
+	'V':  {"10001", "10001", "10001", "10001", "10001", "01010", "00100"},
+	'W':  {"10001", "10001", "10001", "10101", "10101", "10101", "01010"},
+	'X':  {"10001", "10001", "01010", "00100", "01010", "10001", "10001"},
+	'Y':  {"10001", "10001", "01010", "00100", "00100", "00100", "00100"},
+	'Z':  {"11111", "00001", "00010", "00100", "01000", "10000", "11111"},
 }
