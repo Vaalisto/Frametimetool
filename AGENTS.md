@@ -1,9 +1,11 @@
 # Repository notes
 
-- This is a dependency-free Go CLI. `-f` (or `-input`) is mandatory; `-o` defaults to `distribution.png` (800 bins, allowed 2–5000). Optional `-t` sets the title; use `-?` to list all flags. Run from the repository root.
-- `-o` appends `.png` when no extension is given and rejects non-PNG extensions. Output is written via a temp file and cannot alias the input CSV.
-- `-cpu` and `-gpu` override the CSV column headers; defaults are `Render CPU (µs)` and `Render GPU (µs)`.
-- The x-axis adapts to the higher per-series 99.5th percentile; overflow samples are excluded from bins and counted beside the legend.
-- Verify changes with `go test ./...` and build with `go build .`.
-- `resources/example data.csv` is the sample input. Its default `Render CPU (µs)` and `Render GPU (µs)` values are converted to milliseconds; custom header names are selectable with `-cpu`/`-gpu`.
-- `resources/distributionchart.jpg` is a visual reference, not generated output. The chart is rendered using only Go's standard library.
+- Dependency-free Go CLI (standard library only). Run from the repository root, e.g. `go run . -f "resources/example data.csv"`. `-?` lists all flags.
+- Verify with `go test ./...`, `go vet ./...`, and `go build .`.
+- `go env GO111MODULE` is `off` on this machine, so builds use GOPATH mode and `go.mod` is ignored. This is harmless while there are no external dependencies; don't add any without changing this setup.
+- Layout: `main.go` (CLI, validation, CSV parsing, safe output), `distribution.go` (histogram and axis math), `chart.go` (chart layout and drawing), `canvas.go` (rasterizer; takes logical coordinates and scales by `renderScale`), `font.go` (5x7 bitmap glyphs).
+- Titles may only use characters in the bitmap font (`supportedGlyph`). Add glyphs to `font.go` to support more.
+- `-f` is required; `-o` gets `.png` appended if missing and rejects other extensions; `-cpu`/`-gpu` default to `Render CPU (µs)`/`Render GPU (µs)`; `-bins` is 2–5000 (default 800); input is capped at 10,000,000 frames.
+- Histogram smoothing is fixed at 0.05 ms, so `-bins` changes resolution without changing smoothing.
+- The x-axis uses the higher per-series 99.5th percentile; frames beyond it are counted beside the legend, not drawn.
+- `resources/example data.csv` is the sample input. `resources/distributionchart.jpg` is a visual reference only, not generated output.

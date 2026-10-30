@@ -42,8 +42,33 @@ func TestReadFrameTimesRejectsDuplicateColumns(t *testing.T) {
 func TestReadFrameTimesRejectsInvalidValues(t *testing.T) {
 	input := "Render CPU (µs),Render GPU (µs)\nnot-a-number,2\n"
 	_, err := readFrameTimes(strings.NewReader(input), cpuColumn, gpuColumn)
-	if err == nil || !strings.Contains(err.Error(), "row 2") {
-		t.Fatalf("expected row-specific parse error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("expected line-specific parse error, got %v", err)
+	}
+}
+
+func TestReadFrameTimesReportsPhysicalLineNumber(t *testing.T) {
+	input := "Note,Render CPU (µs),Render GPU (µs)\n\"multi\nline\",1250,2500\nkeep,not-a-number,2\n"
+	_, err := readFrameTimes(strings.NewReader(input), cpuColumn, gpuColumn)
+	if err == nil || !strings.Contains(err.Error(), "line 4") {
+		t.Fatalf("expected error on physical line 4, got %v", err)
+	}
+}
+
+func TestReadFrameTimesListsAvailableColumns(t *testing.T) {
+	_, err := readFrameTimes(strings.NewReader("Time,App CPU\n1,2\n"), cpuColumn, gpuColumn)
+	if err == nil || !strings.Contains(err.Error(), `"App CPU"`) {
+		t.Fatalf("expected error listing the found columns, got %v", err)
+	}
+}
+
+func TestReadFrameTimesEnforcesFrameLimit(t *testing.T) {
+	input := "Render CPU (µs),Render GPU (µs)\n1,1\n2,2\n"
+	if _, err := readFrameTimesLimit(strings.NewReader(input), cpuColumn, gpuColumn, 1); err == nil {
+		t.Fatal("expected frame limit to be enforced")
+	}
+	if _, err := readFrameTimesLimit(strings.NewReader(input), cpuColumn, gpuColumn, 2); err != nil {
+		t.Fatalf("frame limit rejected input at the limit: %v", err)
 	}
 }
 
@@ -255,6 +280,62 @@ func TestWriteChartRejectsSingleBin(t *testing.T) {
 	times := frameTimes{cpuMS: []float64{1}, gpuMS: []float64{2}}
 	if err := writeChart(&bytes.Buffer{}, times, 1, ""); err == nil {
 		t.Fatal("expected a single-bin chart to be rejected")
+	}
+}
+
+func TestWriteChartRendersMinimumBins(t *testing.T) {
+	var output bytes.Buffer
+	times := frameTimes{cpuMS: []float64{1, 2}, gpuMS: []float64{3, 4}}
+	if err := writeChart(&output, times, minBins, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := png.Decode(&output); err != nil {
+		t.Fatalf("minimum-bin chart is not a valid PNG: %v", err)
+	}
+}
+
+func TestSmoothingWidthIsFixedInMilliseconds(t *testing.T) {
+	const xMax = 25.0
+	for _, bins := range []int{100, 800} {
+		widthMS := smoothingSigmaBins(xMax, bins) * xMax / float64(bins)
+		if math.Abs(widthMS-smoothingSigmaMS) > 1e-12 {
+			t.Fatalf("bins=%d smoothing width = %v ms, want %v", bins, widthMS, smoothingSigmaMS)
+		}
+	}
+}
+
+func TestSmoothHistogramHandlesExtremeSigma(t *testing.T) {
+	counts := make([]int, 5000)
+	counts[2500] = 10
+	smoothed := smoothHistogram(counts, 1e300)
+	total := 0.0
+	for _, value := range smoothed {
+		total += value
+	}
+	if math.Abs(total-10) > 1e-6 {
+		t.Fatalf("extreme smoothing changed total weight: %f", total)
+	}
+}
+
+func TestNiceCeilingRoundsUpToOneTwoTwoFiveFive(t *testing.T) {
+	tests := map[float64]float64{0: 1, 1: 1, 1.2: 2, 2.2: 2.5, 3: 5, 12.3: 20}
+	for input, want := range tests {
+		if got := niceCeiling(input); math.Abs(got-want) > 1e-12 {
+			t.Errorf("niceCeiling(%v) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+func TestSupportedGlyphMatchesRenderableCharacters(t *testing.T) {
+	for _, r := range "aZ 0%!" {
+		if !supportedGlyph(r) {
+			t.Errorf("supportedGlyph(%q) = false, want true", r)
+		}
+	}
+	for _, r := range "–é" {
+		if supportedGlyph(r) {
+			t.Errorf("supportedGlyph(%q) = true, want false", r)
+		}
 	}
 }
 

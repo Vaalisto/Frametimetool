@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,8 +17,11 @@ import (
 )
 
 const (
-	cpuColumn = "Render CPU (µs)"
-	gpuColumn = "Render GPU (µs)"
+	cpuColumn     = "Render CPU (µs)"
+	gpuColumn     = "Render GPU (µs)"
+	defaultOutput = "distribution.png"
+	maxFrames     = 10_000_000
+	maxTitleRunes = 200
 )
 
 type frameTimes struct {
@@ -31,17 +35,17 @@ func main() {
 	cpuHeader := flag.String("cpu", cpuColumn, "CSV column containing render CPU time")
 	gpuHeader := flag.String("gpu", gpuColumn, "CSV column containing render GPU time")
 	title := flag.String("t", "", "optional chart title")
-	outputPath := flag.String("o", "distribution.png", "PNG chart output path (.png is added if omitted)")
-	flag.StringVar(outputPath, "output", "distribution.png", "alias for -o")
-	bins := flag.Int("bins", 800, "number of histogram bins (2 to 5000)")
+	outputPath := flag.String("o", defaultOutput, "PNG chart output path (.png is added if omitted)")
+	flag.StringVar(outputPath, "output", defaultOutput, "alias for -o")
+	bins := flag.Int("bins", defaultBins, fmt.Sprintf("number of histogram bins (%d to %d)", minBins, maxBins))
+	help := flag.Bool("?", false, "show this help and exit")
 	flag.Usage = printUsage
-	for _, arg := range os.Args[1:] {
-		if arg == "-?" {
-			printUsage()
-			return
-		}
-	}
 	flag.Parse()
+
+	if *help {
+		printUsage()
+		return
+	}
 	if *inputPath == "" {
 		fatalf("-f is mandatory; use -? to see usage and all available flags")
 	}
@@ -54,9 +58,8 @@ func main() {
 	if err := validateColumnNames(*cpuHeader, *gpuHeader); err != nil {
 		fatalf("CSV columns: %v", err)
 	}
-
-	if *bins < 2 || *bins > 5000 {
-		fatalf("-bins must be between 2 and 5000")
+	if *bins < minBins || *bins > maxBins {
+		fatalf("-bins must be between %d and %d", minBins, maxBins)
 	}
 	normalizedOutputPath, err := ensurePNGExtension(*outputPath)
 	if err != nil {
@@ -138,18 +141,14 @@ func validateNoControlCharacters(value string) error {
 
 func validateTitle(title string) (string, error) {
 	title = strings.TrimSpace(title)
-	if utf8.RuneCountInString(title) > 200 {
-		return "", fmt.Errorf("title must be 200 characters or fewer")
+	if utf8.RuneCountInString(title) > maxTitleRunes {
+		return "", fmt.Errorf("title must be %d characters or fewer", maxTitleRunes)
 	}
 	for _, char := range title {
 		if unicode.IsControl(char) {
 			return "", fmt.Errorf("title cannot contain control characters")
 		}
-		glyphChar := char
-		if glyphChar >= 'a' && glyphChar <= 'z' {
-			glyphChar -= 'a' - 'A'
-		}
-		if _, ok := glyphs[glyphChar]; !ok {
+		if !supportedGlyph(char) {
 			return "", fmt.Errorf("title contains unsupported character %q; use characters supported by the chart font", char)
 		}
 	}
@@ -197,8 +196,7 @@ func checkOutputTarget(input *os.File, outputPath string) error {
 }
 
 func saveChartFile(path string, times frameTimes, bins int, title string) error {
-	directory := filepath.Dir(path)
-	temp, err := os.CreateTemp(directory, ".frametimetool-*.tmp")
+	temp, err := createTempImage(filepath.Dir(path))
 	if err != nil {
 		return fmt.Errorf("create temporary image: %w", err)
 	}
@@ -222,12 +220,32 @@ func saveChartFile(path string, times frameTimes, bins int, title string) error 
 	return nil
 }
 
+// createTempImage creates a uniquely named file with the usual 0666 mode (before
+// umask), so the finished PNG has normal permissions.
+func createTempImage(directory string) (*os.File, error) {
+	for attempt := 0; attempt < 100; attempt++ {
+		name := filepath.Join(directory, fmt.Sprintf(".frametimetool-%d-%d.tmp", os.Getpid(), rand.Uint32()))
+		file, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+		if err == nil {
+			return file, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("could not pick a unique temporary name in %s", directory)
+}
+
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
 }
 
 func readFrameTimes(input io.Reader, cpuName, gpuName string) (frameTimes, error) {
+	return readFrameTimesLimit(input, cpuName, gpuName, maxFrames)
+}
+
+func readFrameTimesLimit(input io.Reader, cpuName, gpuName string, limit int) (frameTimes, error) {
 	if err := validateColumnNames(cpuName, gpuName); err != nil {
 		return frameTimes{}, err
 	}
@@ -239,43 +257,31 @@ func readFrameTimes(input io.Reader, cpuName, gpuName string) (frameTimes, error
 	if len(header) > 0 {
 		header[0] = strings.TrimPrefix(header[0], "\ufeff")
 	}
-	cpuIndex, gpuIndex := -1, -1
-	for i, name := range header {
-		if name == cpuName {
-			if cpuIndex >= 0 {
-				return frameTimes{}, fmt.Errorf("CSV contains duplicate column %q", cpuName)
-			}
-			cpuIndex = i
-		}
-		if name == gpuName {
-			if gpuIndex >= 0 {
-				return frameTimes{}, fmt.Errorf("CSV contains duplicate column %q", gpuName)
-			}
-			gpuIndex = i
-		}
-	}
-	if cpuIndex < 0 || gpuIndex < 0 {
-		return frameTimes{}, fmt.Errorf("CSV must contain columns %q and %q", cpuName, gpuName)
+	cpuIndex, gpuIndex, err := findColumns(header, cpuName, gpuName)
+	if err != nil {
+		return frameTimes{}, err
 	}
 
 	var times frameTimes
-	rowNumber := 1
 	for {
 		record, err := reader.Read()
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		rowNumber++
 		if err != nil {
-			return frameTimes{}, fmt.Errorf("row %d: %w", rowNumber, err)
+			return frameTimes{}, fmt.Errorf("read CSV: %w", err)
+		}
+		line, _ := reader.FieldPos(0)
+		if len(times.cpuMS) == limit {
+			return frameTimes{}, fmt.Errorf("CSV has more than %d frames", limit)
 		}
 		cpu, err := parseMicroseconds(record[cpuIndex])
 		if err != nil {
-			return frameTimes{}, fmt.Errorf("row %d, %s: %w", rowNumber, cpuName, err)
+			return frameTimes{}, fmt.Errorf("line %d, %s: %w", line, cpuName, err)
 		}
 		gpu, err := parseMicroseconds(record[gpuIndex])
 		if err != nil {
-			return frameTimes{}, fmt.Errorf("row %d, %s: %w", rowNumber, gpuName, err)
+			return frameTimes{}, fmt.Errorf("line %d, %s: %w", line, gpuName, err)
 		}
 		times.cpuMS = append(times.cpuMS, cpu/1000)
 		times.gpuMS = append(times.gpuMS, gpu/1000)
@@ -284,6 +290,36 @@ func readFrameTimes(input io.Reader, cpuName, gpuName string) (frameTimes, error
 		return frameTimes{}, fmt.Errorf("CSV contains no frame records")
 	}
 	return times, nil
+}
+
+func findColumns(header []string, cpuName, gpuName string) (int, int, error) {
+	cpuIndex, gpuIndex := -1, -1
+	for i, name := range header {
+		switch name {
+		case cpuName:
+			if cpuIndex >= 0 {
+				return -1, -1, fmt.Errorf("CSV contains duplicate column %q", cpuName)
+			}
+			cpuIndex = i
+		case gpuName:
+			if gpuIndex >= 0 {
+				return -1, -1, fmt.Errorf("CSV contains duplicate column %q", gpuName)
+			}
+			gpuIndex = i
+		}
+	}
+	if cpuIndex < 0 || gpuIndex < 0 {
+		return -1, -1, fmt.Errorf("CSV must contain columns %q and %q; found %s", cpuName, gpuName, quoteAll(header))
+	}
+	return cpuIndex, gpuIndex, nil
+}
+
+func quoteAll(values []string) string {
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = strconv.Quote(value)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func parseMicroseconds(value string) (float64, error) {
