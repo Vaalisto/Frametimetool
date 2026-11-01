@@ -152,7 +152,7 @@ func drawGrid(c canvas, d distribution) {
 
 func drawAxisTitles(c canvas) {
 	c.text(plotLeft+plotWidth/2-textWidth("MS", labelScale)/2, axisTitleY, "MS", labelScale, textColor)
-	c.verticalText(yAxisTitleX, plotTop+plotHeight/2-textWidth("% OF FRAMES", labelScale)/2,
+	c.verticalText(yAxisTitleX, plotTop+plotHeight/2+textWidth("% OF FRAMES", labelScale)/2,
 		"% OF FRAMES", labelScale, textColor)
 }
 

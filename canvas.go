@@ -63,16 +63,16 @@ func (cv canvas) text(x, y int, s string, scale int, c color.RGBA) {
 	}
 }
 
-// verticalText draws s rotated counter-clockwise, so it reads upward.
+// verticalText draws s rotated counter-clockwise, so it reads upward. (x, y) is
+// the bottom of the text: the first rune sits at y and later runes are above it.
 func (cv canvas) verticalText(x, y int, s string, scale int, c color.RGBA) {
 	x, y, size := x*renderScale, y*renderScale, scale*renderScale
-	runes := []rune(s)
-	for index, r := range runes {
-		originY := y + (len(runes)-index-1)*glyphAdvance*size
+	for index, r := range []rune(s) {
+		bottom := y - index*glyphAdvance*size
 		for row, pixels := range glyphFor(r) {
 			for column, pixel := range pixels {
 				if pixel == '1' {
-					cv.fillBlock(x+(glyphRows-1-row)*size, originY+column*size, size, c)
+					cv.fillBlock(x+row*size, bottom-(column+1)*size, size, c)
 				}
 			}
 		}

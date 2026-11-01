@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"image/color"
 	"image/png"
 	"math"
 	"os"
@@ -352,6 +353,33 @@ func TestSupportedGlyphMatchesRenderableCharacters(t *testing.T) {
 		if supportedGlyph(r) {
 			t.Errorf("supportedGlyph(%q) = true, want false", r)
 		}
+	}
+}
+
+func TestVerticalTextReadsUpward(t *testing.T) {
+	c := newCanvas(20, 40, color.RGBA{})
+	c.verticalText(2, 30, "L", 1, color.RGBA{R: 255, A: 255})
+	lowest, count := -1, 0
+	for y := 0; y < c.img.Bounds().Dy(); y++ {
+		for x := 0; x < c.img.Bounds().Dx(); x++ {
+			if c.img.RGBAAt(x, y).A == 0 {
+				continue
+			}
+			if y > lowest {
+				lowest, count = y, 0
+			}
+			if y == lowest {
+				count++
+			}
+		}
+	}
+	// Text starting at logical y=30 grows upward, so its lowest drawn row is just above it.
+	if lowest != 2*30-1 {
+		t.Fatalf("lowest rendered row = %d, want %d", lowest, 2*30-1)
+	}
+	// The "L" stem is the glyph's left column, which rotates to the bottom of the band.
+	if count != 7*renderScale {
+		t.Fatalf("bottom row has %d pixels, want %d", count, 7*renderScale)
 	}
 }
 
